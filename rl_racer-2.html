@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RL Racer</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;background:#111;color:#eee;font-family:system-ui,sans-serif;overflow:hidden}
+#app{display:flex;flex-direction:column;height:100vh}
+#bar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#1c1c1c;border-bottom:1px solid #2a2a2a;flex-shrink:0;flex-wrap:wrap}
+#bar h1{font-size:13px;font-weight:700;color:#fff;margin-right:6px}
+.sep{width:1px;height:18px;background:#333}
+button{padding:4px 11px;border:1px solid #3a3a3a;border-radius:5px;background:#252525;color:#ccc;font-size:11px;cursor:pointer;white-space:nowrap}
+button:hover{background:#2e2e2e;color:#fff}
+button.on{background:#1d4ed8;border-color:#3b82f6;color:#fff}
+button.gn{background:#14532d;border-color:#22c55e;color:#86efac}
+button.rd{background:#7f1d1d;border-color:#ef4444;color:#fca5a5}
+#statbar{display:flex;gap:14px;margin-left:auto}
+.st{font-size:11px;color:#666}.st b{color:#e2e8f0;font-weight:600;margin-left:3px}
+#body{display:flex;flex:1;overflow:hidden}
+#cvwrap{position:relative;flex:1;overflow:hidden}
+#cv{display:block}
+#side{width:190px;flex-shrink:0;background:#161616;border-left:1px solid #222;display:flex;flex-direction:column;overflow-y:auto}
+.sec{padding:9px 11px;border-bottom:1px solid #1e1e1e}
+.sec-title{font-size:9px;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px}
+.row{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+.lbl{font-size:11px;color:#777}
+.val{font-size:12px;font-weight:600;color:#e2e8f0}
+input[type=range]{width:100%;margin:3px 0 7px;accent-color:#3b82f6}
+#netcv{width:100%;height:100px;display:block;background:#0a0a0a;border-radius:4px;margin-bottom:6px}
+#log{font-size:10px;color:#555;font-family:monospace;height:72px;overflow-y:auto;line-height:1.55}
+#log div{color:#94a3b8}
+#buildhint{font-size:11px;color:#64748b;line-height:1.65;margin-bottom:8px}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="bar">
+    <h1>RL Racer</h1>
+    <div class="sep"></div>
+
+    <!-- train mode buttons -->
+    <div id="trainBtns">
+      <button id="btnPause">⏸ Pause</button>
+      <button id="btnReset">↺ Reset AI</button>
+    </div>
+
+    <div class="sep"></div>
+
+    <!-- mode toggle -->
+    <button id="btnModeTrain" class="on">Train</button>
+    <button id="btnModeBuild">Build Track</button>
+
+    <div class="sep"></div>
+
+    <!-- build mode buttons (hidden when training) -->
+    <div id="buildBtns" style="display:none;gap:6px;align-items:center;display:none">
+      <button id="btnFinish" class="gn">Finish track</button>
+      <button id="btnClearPts" class="rd">Clear</button>
+    </div>
+
+    <button class="gn" id="btnDefault">Load default</button>
+
+    <div id="statbar">
+      <div class="st">Gen<b id="sGen">1</b></div>
+      <div class="st">Best<b id="sBest">—</b></div>
+      <div class="st">ε<b id="sEps">1.00</b></div>
+      <div class="st">Laps<b id="sLaps">0</b></div>
+    </div>
+  </div>
+
+  <div id="body">
+    <div id="cvwrap">
+      <canvas id="cv"></canvas>
+    </div>
+    <div id="side">
+      <div class="sec">
+        <div class="sec-title">Speed</div>
+        <input type="range" id="spdR" min="1" max="200" value="5" step="1">
+        <div class="row"><div class="lbl">Steps/frame</div><div class="val" id="spdV">5</div></div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Network</div>
+        <canvas id="netcv"></canvas>
+        <div class="row"><div class="lbl">Reward</div><div class="val" id="sRew">0</div></div>
+        <div class="row"><div class="lbl">Checkpoint</div><div class="val" id="sCp">—</div></div>
+      </div>
+      <div class="sec" id="buildSec" style="display:none">
+        <div class="sec-title">Track builder</div>
+        <div id="buildhint">Click to place centerline points.<br>Right-click to remove last.<br>Need ≥ 5 points.<br><br><b style="color:#facc15">Green</b> = start point.</div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Log</div>
+        <div id="log"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── canvas setup ──────────────────────────────────────────────────────────────
+const cv = document.getElementById('cv');
+const cx = cv.getContext('2d');
+const ncv = document.getElementById('netcv');
+const nx = ncv.getContext('2d');
+
+function fitCanvas() {
+  const wrap = document.getElementById('cvwrap');
+  cv.width  = wrap.clientWidth  || 600;
+  cv.height = wrap.clientHeight || 400;
+}
+
+// ── default track centerline ──────────────────────────────────────────────────
+const DEFAULT_CL = [
+  [120,70],[260,55],[390,60],[460,100],[490,180],
+  [470,270],[410,330],[310,360],[200,355],[120,310],
+  [70,240],[65,160]
+];
+
+// ── track state ───────────────────────────────────────────────────────────────
+const HW = 30; // half-width
+let CL=[], OPts=[], IPts=[], walls=[], CPs=[];
+let trackOK = false;
+let offscr = null;
+
+function v2norm(dx,dy){ const l=Math.hypot(dx,dy)||1; return [dx/l,dy/l]; }
+
+function buildTrack(pts) {
+  if(pts.length < 5) { alert('Need at least 5 points'); return false; }
+  const n = pts.length;
+  CL = pts.slice();
+  OPts=[]; IPts=[];
+  for(let i=0;i<n;i++){
+    const prev=CL[(i-1+n)%n], curr=CL[i], next=CL[(i+1)%n];
+    const [nx1,ny1]=v2norm(curr[0]-prev[0],curr[1]-prev[1]);
+    const [nx2,ny2]=v2norm(next[0]-curr[0],next[1]-curr[1]);
+    let tx=(nx1+nx2)/2, ty=(ny1+ny2)/2;
+    const tl=Math.hypot(tx,ty)||1; tx/=tl; ty/=tl;
+    const px=ty, py=-tx;
+    OPts.push([curr[0]+px*HW, curr[1]+py*HW]);
+    IPts.push([curr[0]-px*HW, curr[1]-py*HW]);
+  }
+  // wall segments
+  walls=[];
+  for(let i=0;i<n;i++){
+    const j=(i+1)%n;
+    walls.push([OPts[i],OPts[j]]);
+    walls.push([IPts[i],IPts[j]]);
+  }
+  // checkpoints every 2 CL points
+  CPs=[];
+  for(let i=0;i<n;i+=2){
+    const j=(i+1)%n;
+    const dx=CL[j][0]-CL[i][0], dy=CL[j][1]-CL[i][1];
+    const [pxn,pyn]=v2norm(dy,-dx);
+    const s=HW*1.08;
+    CPs.push({a:[CL[i][0]+pxn*s,CL[i][1]+pyn*s], b:[CL[i][0]-pxn*s,CL[i][1]-pyn*s]});
+  }
+  trackOK = true;
+  buildOffscreen();
+  resetAI();
+  log(`Track ready — ${n} nodes, ${CPs.length} checkpoints`);
+  return true;
+}
+
+function buildOffscreen(){
+  if(!trackOK || cv.width===0 || cv.height===0) return;
+  offscr = document.createElement('canvas');
+  offscr.width=cv.width; offscr.height=cv.height;
+  const oc=offscr.getContext('2d');
+  oc.fillStyle='#1a2e1a'; oc.fillRect(0,0,cv.width,cv.height);
+  // asphalt
+  oc.beginPath();
+  OPts.forEach(([x,y],i)=>i?oc.lineTo(x,y):oc.moveTo(x,y)); oc.closePath();
+  IPts.forEach(([x,y],i)=>i?oc.lineTo(x,y):oc.moveTo(x,y)); oc.closePath();
+  oc.fillStyle='#2d2d2d'; oc.fill('evenodd');
+  // edges
+  [[OPts,'#666'],[IPts,'#666']].forEach(([pts,col])=>{
+    oc.strokeStyle=col; oc.lineWidth=2;
+    oc.beginPath(); pts.forEach(([x,y],i)=>i?oc.lineTo(x,y):oc.moveTo(x,y)); oc.closePath(); oc.stroke();
+  });
+  // white rumble
+  [[OPts,'rgba(255,255,255,.1)'],[IPts,'rgba(255,255,255,.1)']].forEach(([pts,col])=>{
+    oc.strokeStyle=col; oc.lineWidth=5;
+    oc.beginPath(); pts.forEach(([x,y],i)=>i?oc.lineTo(x,y):oc.moveTo(x,y)); oc.closePath(); oc.stroke();
+  });
+  // dashed center
+  oc.strokeStyle='rgba(255,255,255,.07)'; oc.lineWidth=1.5; oc.setLineDash([7,9]);
+  oc.beginPath(); CL.forEach(([x,y],i)=>i?oc.lineTo(x,y):oc.moveTo(x,y)); oc.closePath(); oc.stroke();
+  oc.setLineDash([]);
+  // S/F line
+  oc.strokeStyle='#fff'; oc.lineWidth=3;
+  oc.beginPath(); oc.moveTo(OPts[0][0],OPts[0][1]); oc.lineTo(IPts[0][0],IPts[0][1]); oc.stroke();
+  oc.fillStyle='rgba(255,255,255,.6)'; oc.font='bold 9px system-ui'; oc.textAlign='center';
+  oc.fillText('S/F',(OPts[0][0]+IPts[0][0])/2,(OPts[0][1]+IPts[0][1])/2-5);
+}
+
+// ── geometry ──────────────────────────────────────────────────────────────────
+function segT(ax,ay,bx,by,cx,cy,dx,dy){
+  const rx=bx-ax,ry=by-ay,sx=dx-cx,sy=dy-cy,d=rx*sy-ry*sx;
+  if(Math.abs(d)<1e-9) return null;
+  const t=((cx-ax)*sy-(cy-ay)*sx)/d, u=((cx-ax)*ry-(cy-ay)*rx)/d;
+  return(t>=0&&t<=1&&u>=0&&u<=1)?t:null;
+}
+
+function raycast(ox,oy,ang,max=240){
+  let best=max,hx=ox+Math.cos(ang)*max,hy=oy+Math.sin(ang)*max;
+  for(const[[ax,ay],[bx,by]] of walls){
+    const t=segT(ox,oy,hx,hy,ax,ay,bx,by);
+    if(t!==null&&t*max<best){ best=t*max; hx=ox+Math.cos(ang)*best; hy=oy+Math.sin(ang)*best; }
+  }
+  return{d:best,hx,hy};
+}
+
+function inPoly(px,py,poly){
+  let ins=false,n=poly.length;
+  for(let i=0,j=n-1;i<n;j=i++){
+    const xi=poly[i][0],yi=poly[i][1],xj=poly[j][0],yj=poly[j][1];
+    if((yi>py)!==(yj>py)&&px<(xj-xi)*(py-yi)/(yj-yi)+xi) ins=!ins;
+  }
+  return ins;
+}
+function onTrack(x,y){ return inPoly(x,y,OPts)&&!inPoly(x,y,IPts); }
+
+// ── neural net (Q) ────────────────────────────────────────────────────────────
+class QNet {
+  constructor(i=9,h=12,o=4){
+    this.i=i;this.h=h;this.o=o;
+    this.W1=this.rnd(i,h);this.b1=new Float64Array(h);
+    this.W2=this.rnd(h,o);this.b2=new Float64Array(o);
+  }
+  rnd(r,c){return Array.from({length:r},()=>Float64Array.from({length:c},()=>(Math.random()-.5)*.9));}
+  fwd(x){
+    const h=this.b1.map((b,j)=>Math.max(0,b+x.reduce((s,v,i)=>s+v*this.W1[i][j],0)));
+    const o=this.b2.map((b,j)=>b+h.reduce((s,v,i)=>s+v*this.W2[i][j],0));
+    return{h,o};
+  }
+  train(x,a,tgt,lr=0.07){
+    const{h,o}=this.fwd(x);
+    const e=tgt-o[a];
+    for(let i=0;i<this.h;i++)this.W2[i][a]+=lr*e*h[i];
+    this.b2[a]+=lr*e;
+    const dh=h.map((_,i)=>this.W2[i][a]*e*(h[i]>0?1:0));
+    for(let i=0;i<this.i;i++)for(let j=0;j<this.h;j++)this.W1[i][j]+=lr*.2*dh[j]*x[i];
+  }
+}
+
+const GAMMA=0.95,EPS_MIN=0.04,EPS_DEC=0.9997;
+let eps=1,net=new QNet(),gen=1,bestMs=Infinity,totalLaps=0,totRew=0;
+
+// ── car ───────────────────────────────────────────────────────────────────────
+function mkCar(){
+  if(!trackOK) return{alive:false,x:0,y:0,ang:0,spd:0,av:0,ncp:0,steps:0,lapT:0,lastCpT:0};
+  const sx=(OPts[0][0]+IPts[0][0])/2;
+  const sy=(OPts[0][1]+IPts[0][1])/2;
+  const ang=Math.atan2(CL[1][1]-CL[0][1],CL[1][0]-CL[0][0]);
+  const now=performance.now();
+  return{alive:true,x:sx,y:sy,ang,spd:.5,av:0,ncp:0,steps:0,lapT:now,lastCpT:now};
+}
+let car=mkCar();
+
+const NR=7, RS=Math.PI*.88;
+function sens(c){return Array.from({length:NR},(_,i)=>raycast(c.x,c.y,c.ang-RS/2+(i/(NR-1))*RS));}
+function state(c){const s=sens(c);return[...s.map(r=>r.d/240),Math.min(c.spd/4,1),(c.av/.12+1)/2];}
+
+function act(c,a){
+  if(a===0)c.spd=Math.min(c.spd+.55,4);
+  else if(a===1)c.spd=Math.max(c.spd-.35,0);
+  else if(a===2)c.av=Math.max(c.av-.02,-.12);
+  else          c.av=Math.min(c.av+.02, .12);
+  c.av*=.78; c.ang+=c.av; c.spd*=.97;
+  c.x+=Math.cos(c.ang)*c.spd;
+  c.y+=Math.sin(c.ang)*c.spd;
+}
+
+function checkCP(c){
+  if(!CPs.length)return 0;
+  const cp=CPs[c.ncp];
+  const hit=(segT(c.x-3,c.y,c.x+3,c.y,cp.a[0],cp.a[1],cp.b[0],cp.b[1])!==null)||
+            (segT(c.x,c.y-3,c.x,c.y+3,cp.a[0],cp.a[1],cp.b[0],cp.b[1])!==null);
+  if(hit){
+    const now=performance.now();
+    const cpMs=now-c.lastCpT;
+    c.lastCpT=now;
+    c.ncp=(c.ncp+1)%CPs.length;
+    if(c.ncp===0){
+      totalLaps++;
+      const ms=now-c.lapT;
+      if(ms<bestMs){bestMs=ms;document.getElementById('sBest').textContent=(ms/1000).toFixed(2)+'s';}
+      c.lapT=now;
+      log(`Gen ${gen} | lap ${(ms/1000).toFixed(2)}s | ε=${eps.toFixed(3)}`);
+      document.getElementById('sLaps').textContent=totalLaps;
+    }
+    // faster = more reward; baseline 2s per CP → reward 1.0
+    return Math.max(0.2, 2.0/Math.max(cpMs/1000, 0.1));
+  }
+  return 0;
+}
+
+// Forward angles at each checkpoint for backward detection
+function buildCpAngles(){
+  return CPs.map((_,i)=>{
+    const ai=Math.min(i*2,CL.length-1), bi=Math.min(i*2+1,CL.length-1);
+    return Math.atan2(CL[bi][1]-CL[ai][1],CL[bi][0]-CL[ai][0]);
+  });
+}
+let CP_ANGLES=[];
+function angleDiff(a,b){return((a-b)%(Math.PI*2)+Math.PI*3)%(Math.PI*2)-Math.PI;}
+
+function stepCar(){
+  if(!car.alive||!trackOK)return;
+  const s=state(car);
+  const q=net.fwd(s).o;
+  const a=Math.random()<eps?Math.floor(Math.random()*4):q.reduce((b,v,i,arr)=>v>arr[b]?i:b,0);
+  act(car,a);
+
+  let r=0;
+  // reward going fast
+  r+=car.spd/4*0.02;
+  // penalise facing backward vs track direction
+  if(CP_ANGLES.length){
+    const fwd=CP_ANGLES[Math.min(car.ncp,CP_ANGLES.length-1)];
+    const diff=Math.abs(angleDiff(car.ang,fwd));
+    if(diff>Math.PI*0.6) r-=0.05;
+    if(diff>Math.PI*0.9) r-=0.10;
+  }
+  // time-scaled checkpoint reward
+  r+=checkCP(car);
+  // wall crash
+  if(!onTrack(car.x,car.y)){r=-3;car.alive=false;}
+  // stall penalty
+  if(car.spd<.1&&car.alive)r-=0.03;
+
+  car.steps++;totRew+=r;
+  const done=!car.alive||car.steps>3000;
+  const tgt=done?r:r+GAMMA*Math.max(...net.fwd(state(car)).o);
+  net.train(s,a,tgt);
+  eps=Math.max(EPS_MIN,eps*EPS_DEC);
+  if(done){gen++;document.getElementById('sGen').textContent=gen;car=mkCar();}
+  document.getElementById('sEps').textContent=eps.toFixed(2);
+  document.getElementById('sRew').textContent=Math.round(totRew);
+  document.getElementById('sCp').textContent=CPs.length?car.ncp+'/'+CPs.length:'—';
+}
+
+// ── draw ──────────────────────────────────────────────────────────────────────
+function drawFrame(){
+  cx.clearRect(0,0,cv.width,cv.height);
+
+  if(mode==='build'){
+    // builder canvas
+    cx.fillStyle='#141414'; cx.fillRect(0,0,cv.width,cv.height);
+    cx.strokeStyle='rgba(255,255,255,.03)'; cx.lineWidth=1;
+    for(let x=0;x<cv.width;x+=40){cx.beginPath();cx.moveTo(x,0);cx.lineTo(x,cv.height);cx.stroke();}
+    for(let y=0;y<cv.height;y+=40){cx.beginPath();cx.moveTo(0,y);cx.lineTo(cv.width,y);cx.stroke();}
+    drawBuilderUI();
+    return;
+  }
+
+  if(!trackOK){
+    cx.fillStyle='#141414'; cx.fillRect(0,0,cv.width,cv.height);
+    cx.fillStyle='#444'; cx.font='14px system-ui'; cx.textAlign='center';
+    cx.fillText('No track loaded — use "Load default" or "Build Track"',cv.width/2,cv.height/2);
+    return;
+  }
+
+  if(offscr) cx.drawImage(offscr,0,0);
+
+  // checkpoints
+  CPs.forEach((cp,i)=>{
+    cx.strokeStyle=i<car.ncp?'rgba(34,197,94,.5)':'rgba(250,204,21,.18)';
+    cx.lineWidth=1.5; cx.setLineDash([3,5]);
+    cx.beginPath(); cx.moveTo(cp.a[0],cp.a[1]); cx.lineTo(cp.b[0],cp.b[1]); cx.stroke();
+    cx.setLineDash([]);
+  });
+
+  // rays
+  if(car.alive){
+    sens(car).forEach(s=>{
+      cx.strokeStyle=`rgba(56,189,248,${.07+s.d/240*.15})`; cx.lineWidth=.8;
+      cx.beginPath(); cx.moveTo(car.x,car.y); cx.lineTo(s.hx,s.hy); cx.stroke();
+      cx.fillStyle=s.d<60?'rgba(248,113,113,.9)':'rgba(56,189,248,.7)';
+      cx.beginPath(); cx.arc(s.hx,s.hy,2,0,Math.PI*2); cx.fill();
+    });
+  }
+
+  // car
+  if(car.alive){
+    cx.save(); cx.translate(car.x,car.y); cx.rotate(car.ang);
+    cx.fillStyle='#2563eb'; cx.fillRect(-8,-4,16,8);
+    cx.fillStyle='#93c5fd'; cx.fillRect(0,-2.5,5,5);
+    cx.fillStyle='#0a0a0a';
+    [[-7,-5],[-7,3],[4,-5],[4,3]].forEach(([wx,wy])=>cx.fillRect(wx,wy,4,2));
+    cx.restore();
+  } else {
+    cx.fillStyle='rgba(239,68,68,.5)';
+    cx.beginPath(); cx.arc(car.x,car.y,9,0,Math.PI*2); cx.fill();
+  }
+
+  // speed bar
+  cx.fillStyle='rgba(0,0,0,.45)'; cx.fillRect(8,cv.height-18,88,8);
+  cx.fillStyle='#3b82f6'; cx.fillRect(8,cv.height-18,car.spd/4*88,8);
+  cx.fillStyle='rgba(255,255,255,.35)'; cx.font='9px system-ui'; cx.textAlign='left';
+  cx.fillText('speed',10,cv.height-22);
+}
+
+function drawNet(){
+  const W=ncv.width=ncv.offsetWidth||180, H=100;
+  ncv.height=H;
+  nx.fillStyle='#0a0a0a'; nx.fillRect(0,0,W,H);
+  if(!trackOK&&!car.alive)return;
+  const lx=[12,W/2,W-20], counts=[9,12,4], colors=['#3b82f6','#a78bfa','#34d399'];
+  const s=state(car); const{h,o}=net.fwd(s);
+  const sm=o.map(v=>Math.exp(v)), ss=sm.reduce((a,b)=>a+b,0);
+  const pr=sm.map(v=>v/ss);
+  const vals=[s,h,o];
+  counts.forEach((n,li)=>{
+    const ys=Array.from({length:n},(_,i)=>6+(i/(n-1||1))*(H-12));
+    ys.forEach((y,ni)=>{
+      if(li<2){
+        const n2=counts[li+1];
+        const ys2=Array.from({length:n2},(_,j)=>6+(j/(n2-1||1))*(H-12));
+        ys2.forEach((y2,ni2)=>{
+          const w=li===0?net.W1[ni][ni2]:net.W2[ni][ni2];
+          nx.strokeStyle=w>0?`rgba(74,222,128,${Math.min(Math.abs(w)*.28,.32)})`:`rgba(248,113,113,${Math.min(Math.abs(w)*.28,.32)})`;
+          nx.lineWidth=.55; nx.beginPath(); nx.moveTo(lx[li],y); nx.lineTo(lx[li+1],y2); nx.stroke();
+        });
+      }
+      const v=vals[li][ni], norm=li===2?pr[ni]:Math.max(0,Math.min(1,v));
+      nx.beginPath(); nx.arc(lx[li],y,3.5,0,Math.PI*2);
+      nx.fillStyle=colors[li]; nx.globalAlpha=.1+norm*.9; nx.fill();
+      nx.globalAlpha=1; nx.strokeStyle=colors[li]; nx.lineWidth=.9; nx.stroke();
+    });
+  });
+  ['↑','↓','←','→'].forEach((l,i)=>{
+    const y=6+(i/3)*(H-12);
+    nx.fillStyle='rgba(148,163,184,.65)'; nx.font='10px system-ui'; nx.textAlign='left';
+    nx.fillText(l,lx[2]+5,y+3);
+  });
+}
+
+// ── builder ───────────────────────────────────────────────────────────────────
+let bPts=[];
+
+function drawBuilderUI(){
+  if(!bPts.length){
+    cx.fillStyle='#444'; cx.font='13px system-ui'; cx.textAlign='center';
+    cx.fillText('Click to place track centerline points',cv.width/2,cv.height/2);
+    return;
+  }
+  cx.strokeStyle='rgba(250,204,21,.55)'; cx.lineWidth=2; cx.setLineDash([5,6]);
+  cx.beginPath(); bPts.forEach(([x,y],i)=>i?cx.lineTo(x,y):cx.moveTo(x,y));
+  if(bPts.length>2){ cx.lineTo(bPts[0][0],bPts[0][1]); }
+  cx.stroke(); cx.setLineDash([]);
+  bPts.forEach(([x,y],i)=>{
+    cx.beginPath(); cx.arc(x,y,6,0,Math.PI*2);
+    cx.fillStyle=i===0?'#22c55e':'#facc15'; cx.fill();
+    cx.strokeStyle='#fff'; cx.lineWidth=1.2; cx.stroke();
+  });
+  cx.fillStyle='rgba(250,204,21,.7)'; cx.font='11px system-ui'; cx.textAlign='left';
+  cx.fillText(bPts.length+' pts  |  right-click = undo  |  "Finish track" when done',8,18);
+}
+
+cv.addEventListener('click', e=>{
+  if(mode!=='build') return;
+  const r=cv.getBoundingClientRect();
+  const sx=cv.width/r.width, sy=cv.height/r.height;
+  bPts.push([(e.clientX-r.left)*sx, (e.clientY-r.top)*sy]);
+});
+cv.addEventListener('contextmenu', e=>{
+  e.preventDefault();
+  if(mode==='build') bPts.pop();
+});
+
+// ── mode switching ────────────────────────────────────────────────────────────
+let mode='train';
+
+function setMode(m){
+  mode=m;
+  document.getElementById('btnModeTrain').classList.toggle('on',m==='train');
+  document.getElementById('btnModeBuild').classList.toggle('on',m==='build');
+  document.getElementById('trainBtns').style.display=m==='train'?'flex':'none';
+  // use flex not block for buildBtns so gap works
+  document.getElementById('buildBtns').style.display=m==='build'?'flex':'none';
+  document.getElementById('buildSec').style.display=m==='build'?'block':'none';
+}
+
+document.getElementById('btnModeTrain').onclick=()=>setMode('train');
+document.getElementById('btnModeBuild').onclick=()=>{ bPts=[]; setMode('build'); };
+
+document.getElementById('btnFinish').onclick=()=>{
+  if(bPts.length<5){alert('Place at least 5 points');return;}
+  if(buildTrack(bPts)) setMode('train');
+};
+document.getElementById('btnClearPts').onclick=()=>{ bPts=[]; };
+
+document.getElementById('btnDefault').onclick=()=>{ buildTrack(DEFAULT_CL); setMode('train'); };
+
+// ── train controls ────────────────────────────────────────────────────────────
+function resetAI(){
+  eps=1; gen=1; bestMs=Infinity; totalLaps=0; totRew=0;
+  net=new QNet(); car=mkCar();
+  document.getElementById('sGen').textContent='1';
+  document.getElementById('sBest').textContent='—';
+  document.getElementById('sEps').textContent='1.00';
+  document.getElementById('sLaps').textContent='0';
+  document.getElementById('sRew').textContent='0';
+  document.getElementById('log').innerHTML='';
+}
+
+let paused=false;
+document.getElementById('btnPause').onclick=function(){
+  paused=!paused;
+  this.classList.toggle('on',paused);
+  this.textContent=paused?'▶ Resume':'⏸ Pause';
+  if(!paused){ raf=requestAnimationFrame(loop); }
+};
+document.getElementById('btnReset').onclick=resetAI;
+
+const spdR=document.getElementById('spdR'), spdV=document.getElementById('spdV');
+spdR.oninput=()=>spdV.textContent=spdR.value;
+
+// ── log ───────────────────────────────────────────────────────────────────────
+function log(msg){
+  const d=document.createElement('div');
+  d.textContent=msg;
+  const l=document.getElementById('log');
+  l.insertBefore(d,l.firstChild);
+  while(l.children.length>40) l.removeChild(l.lastChild);
+}
+
+// ── loop ──────────────────────────────────────────────────────────────────────
+let raf=null, lastT=0;
+function loop(ts){
+  if(mode==='train'){
+    const n=parseInt(spdR.value);
+    for(let i=0;i<n;i++) stepCar();
+  }
+  if(ts-lastT>15){ drawFrame(); drawNet(); lastT=ts; }
+  if(!paused) raf=requestAnimationFrame(loop);
+}
+
+// ── boot ──────────────────────────────────────────────────────────────────────
+// Use two rAF calls to guarantee layout has settled
+requestAnimationFrame(()=>requestAnimationFrame(()=>{
+  fitCanvas();
+  window.addEventListener('resize',()=>{ fitCanvas(); buildOffscreen(); });
+  buildTrack(DEFAULT_CL);
+  setMode('train');
+  raf=requestAnimationFrame(loop);
+}));
+</script>
+</body>
+</html>
